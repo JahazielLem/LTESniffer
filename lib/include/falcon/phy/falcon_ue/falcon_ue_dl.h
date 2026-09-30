@@ -30,6 +30,16 @@
 
 #include <time.h>
 
+// The srsRAN C headers below lack their own extern "C" guards, so they must be
+// wrapped by the includer to get C linkage. On macOS, however, libc++'s
+// <complex.h> pulls in the C++ <complex>/<tuple> templates, which are illegal
+// inside an extern "C" block. Pre-including those C++ headers here (with normal
+// C++ linkage) makes the later nested include a no-op via its include guard.
+#ifdef __cplusplus
+#include <complex>
+#include <tuple>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

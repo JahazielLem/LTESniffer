@@ -1,4 +1,10 @@
-cmake_minimum_required (VERSION 2.8.11)
+cmake_minimum_required (VERSION 3.5)
+
+# CMake >= 4.0 removed compatibility with the ancient cmake_minimum_required
+# values used by the downloaded sub-projects (cmnalib, srsRAN2). Propagate a
+# minimum policy version so those still configure. Propagates to add_subdirectory
+# and (explicitly, below) to the ExternalProject download invocations.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Min CMake policy version for subprojects")
 
 #######################################################################
 #   INSTALL TARGET for make install
@@ -70,7 +76,13 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules")
 # Check for CMNAlib in system.
 
 find_package(CMNALIB)
-if(CMNALIB_FOUND AND NOT FORCE_SUBPROJECT_CMNALIB)
+if(APPLE)
+  # cmnalib (c-mnalib) depends on Linux-only libudev and is only linked into
+  # falcon_meas, which is NOT part of the LTESniffer binary. Skip it on macOS.
+  message(STATUS "Skipping CMNALIB on macOS (not required by LTESniffer).")
+  set(CMNALIB_LIBRARY "")
+  set(CMNALIB_LIBRARIES "")
+elseif(CMNALIB_FOUND AND NOT FORCE_SUBPROJECT_CMNALIB)
   include_directories(${CMNALIB_INCLUDE_DIRS})
   link_directories(${CMNALIB_LIBRARY_DIRS})
 else(CMNALIB_FOUND AND NOT FORCE_SUBPROJECT_CMNALIB)
@@ -95,10 +107,14 @@ endif(CMNALIB_FOUND AND NOT FORCE_SUBPROJECT_CMNALIB)
 message("CMNALIB_LIBRARY: " ${CMNALIB_LIBRARY})
 message("CMNALIB_LIBRARIES: " ${CMNALIB_LIBRARIES})
 
-# cmnalib also needs glib:
+# cmnalib also needs glib (not required on macOS, where cmnalib is skipped):
 
 INCLUDE(FindPkgConfig)
-pkg_check_modules(GLIB2		REQUIRED	glib-2.0)
+if(APPLE)
+  pkg_check_modules(GLIB2 glib-2.0)
+else(APPLE)
+  pkg_check_modules(GLIB2		REQUIRED	glib-2.0)
+endif(APPLE)
 
 include_directories(${GLIB2_INCLUDE_DIRS})
 #link_directories(${GLIB2_LIBRARY_DIRS})
@@ -175,9 +191,18 @@ else(SRSRAN_FOUND AND NOT FORCE_SUBPROJECT_SRSRAN)
 
   message("Download SRSRAN as a subproject and build it.")
 
+  # On macOS the downloaded srsRAN2 fork needs a source patch to build. The
+  # patch command is substituted into the ExternalProject template below (empty
+  # elsewhere, which disables the patch step). Runs in the cloned SOURCE_DIR.
+  if(APPLE)
+    set(SRSRAN_PATCH_COMMAND git apply "${PROJECT_SOURCE_DIR}/external/patches/srsRAN2-macos.patch")
+  else(APPLE)
+    set(SRSRAN_PATCH_COMMAND "")
+  endif(APPLE)
+
   # Download and unpack srsRAN at configure time
   configure_file(external/cmake/srsRAN.CMakeLists.txt.in srsRAN-download/CMakeLists.txt)
-  execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" .
+  execute_process(COMMAND "${CMAKE_COMMAND}" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -G "${CMAKE_GENERATOR}" .
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/srsRAN-download" )
   execute_process(COMMAND "${CMAKE_COMMAND}" --build .
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/srsRAN-download" )
@@ -187,6 +212,12 @@ else(SRSRAN_FOUND AND NOT FORCE_SUBPROJECT_SRSRAN)
   include_directories("${CMAKE_BINARY_DIR}/srsRAN-src/")
   # let the compiler find included files from subdirectories
   include_directories(".")
+
+  # LTESniffer only needs the srsRAN libraries, not its srsUE/srsENB/srsEPC
+  # applications (which pull in Linux-only dependencies such as SCTP).
+  set(ENABLE_SRSUE  OFF CACHE BOOL "" FORCE)
+  set(ENABLE_SRSENB OFF CACHE BOOL "" FORCE)
+  set(ENABLE_SRSEPC OFF CACHE BOOL "" FORCE)
 
   # Add srsRAN directly to our build.
   add_subdirectory("${CMAKE_BINARY_DIR}/srsRAN-src"
@@ -318,14 +349,22 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
     endif(HAVE_SSE)
   endif(NOT ${CMAKE_BUILD_TYPE} STREQUAL "Debug")
 
-  if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
+  if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
 
+    # 64-bit ARM (incl. Apple Silicon): NEON is part of the baseline ISA, so no
+    # -mfpu/-mfloat-abi flags are needed (and clang rejects them on arm64).
+    set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -DIS_ARM -DHAVE_NEON -DHAVE_NEONv8")
+    message(STATUS "have ARMv8 (aarch64/arm64)")
+    set(HAVE_NEON "True")
+  elseif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
+
+    # 32-bit ARM
     set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -mfpu=neon -march=native -DIS_ARM -DHAVE_NEON")
     message(STATUS "have ARM")
     set(HAVE_NEON "True")
-  else(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
+  else()
     set(HAVE_NEON "False")
-  endif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
+  endif()
   set(CMAKE_REQUIRED_FLAGS ${CMAKE_C_FLAGS})
 
   if(NOT HAVE_SSE AND NOT HAVE_NEON AND NOT DISABLE_SIMD)
@@ -355,6 +394,11 @@ endif(CMAKE_C_COMPILER_ID MATCHES "GNU" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   # The following is needed for weak linking to work under OS X
   set(CMAKE_SHARED_LINKER_FLAGS "-undefined dynamic_lookup")
+  # macOS hides POSIX/BSD types (size_t, time_t, NULL, ...) under strict
+  # -std=c99 unless _DARWIN_C_SOURCE is defined (the _GNU_SOURCE this project
+  # sets is a no-op on Apple libc).
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_DARWIN_C_SOURCE")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_DARWIN_C_SOURCE")
 endif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 
 message(STATUS "CMAKE_C_FLAGS is ${CMAKE_C_FLAGS}")

@@ -4,6 +4,7 @@
  */
 
 #include "falcon/phy/falcon_phch/dl_sniffer_pdsch.h"
+#include "srsran/phy/utils/debug.h"
 
 const int dl_sniffer_tbs_format1c_table[32] = {40,  56,   72,   120,  136,  144,  176,  208,  224,  256, 280,
                                               296, 328,  336,  392,  488,  552,  600,  632,  696,  776, 840,

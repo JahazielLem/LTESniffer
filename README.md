@@ -42,6 +42,9 @@ LTESniffer is implemented on top of [FALCON][falcon] with the help of [srsRAN][s
 ## Hardware and Software Requirement
 ### OS Requirement
 Currently, LTESniffer works stably on Ubuntu 18.04/20.04/22.04.
+It also builds and runs on **macOS (Apple Silicon)** for downlink sniffing with
+SoapySDR devices such as HackRF and PlutoSDR — see
+[Building on macOS (Apple Silicon)](#building-on-macos-apple-silicon).
 
 ### Hardware Requirement
 Achieving real-time decoding of LTE traffic requires a high-performance CPU with multiple physical cores, especially during peak hours when the base station has many active users. LTESniffer successfully achieved real-time decoding when deployed on an Intel i7-9700K PC, decoding traffic from a base station with 150 active users.
@@ -120,6 +123,113 @@ cd build
 cmake ../
 make -j 4 (use 4 threads)
 ```
+
+## Building on macOS (Apple Silicon)
+
+LTESniffer also builds and runs on macOS on Apple Silicon (tested on an M-series
+Mac with Homebrew). The downlink path works with any SoapySDR-supported SDR; it
+has been used with a **HackRF One** and is prepared for **PlutoSDR** (both go
+through the same SoapySDR driver, so a single binary drives either device).
+
+> Note: macOS support targets the **downlink** sniffing mode. Uplink mode needs
+> a USRP X310 (or two synchronized USRP B2xx) and UHD, which is outside this
+> macOS/HackRF/Pluto setup.
+
+**1. Install the dependencies with Homebrew**
+```bash
+# Toolchain + core libraries
+brew install cmake fftw boost glib libconfig
+
+# mbedTLS: the 2.x API is required (the 4.x default is incompatible)
+brew install mbedtls@2
+
+# SoapySDR and the HackRF driver module
+brew install soapysdr soapyhackrf
+```
+
+**2. (Optional) PlutoSDR support**
+
+PlutoSDR (ADALM-PLUTO) is reached through `SoapyPlutoSDR`, which is not in
+Homebrew and must be built from source together with Analog Devices'
+`libiio`/`libad9361`. Once its module is present under
+`/opt/homebrew/lib/SoapySDR/modules0.8/`, the same `LTESniffer` binary can use it
+with `-a "driver=plutosdr"` — no rebuild needed. Build the stack into the
+Homebrew prefix (no sudo needed on Apple Silicon):
+```bash
+# libiio (v0.25; OSX_FRAMEWORK=OFF installs a plain dylib, not a framework)
+git clone -b v0.25 https://github.com/analogdevicesinc/libiio
+cmake -S libiio -B libiio/build -DCMAKE_INSTALL_PREFIX=/opt/homebrew \
+  -DOSX_FRAMEWORK=OFF -DWITH_LOCAL_BACKEND=OFF -DWITH_TESTS=OFF \
+  -DWITH_DOC=OFF -DWITH_IIOD=OFF -DHAVE_DNS_SD=OFF
+cmake --build libiio/build -j4 && cmake --install libiio/build
+
+# libad9361
+git clone https://github.com/analogdevicesinc/libad9361-iio
+cmake -S libad9361-iio -B libad9361-iio/build \
+  -DCMAKE_INSTALL_PREFIX=/opt/homebrew -DOSX_FRAMEWORK=OFF
+cmake --build libad9361-iio/build -j4 && cmake --install libad9361-iio/build
+
+# SoapyPlutoSDR (CMAKE_FIND_FRAMEWORK=NEVER avoids a stale /Library/Frameworks copy)
+git clone https://github.com/pothosware/SoapyPlutoSDR
+cmake -S SoapyPlutoSDR -B SoapyPlutoSDR/build \
+  -DCMAKE_INSTALL_PREFIX=/opt/homebrew -DCMAKE_FIND_FRAMEWORK=NEVER \
+  -DCMAKE_PREFIX_PATH=/opt/homebrew
+cmake --build SoapyPlutoSDR/build -j4 && cmake --install SoapyPlutoSDR/build
+
+SoapySDRUtil --find    # should now list plutosdr (and hackrf)
+```
+PlutoSDR tunes 325 MHz – 3.8 GHz, so use it only within that range.
+
+**3. Build**
+```bash
+git clone https://github.com/SysSec-KAIST/LTESniffer.git
+cd LTESniffer
+mkdir build && cd build
+cmake ..
+make -j4
+```
+The build downloads and, on macOS, automatically patches the srsRAN2 sub-project
+(`external/patches/srsRAN2-macos.patch`) so it compiles with the Apple clang
+toolchain. The resulting binary is `build/src/LTESniffer`.
+
+To run `LTESniffer` from any directory, install it onto your PATH (no sudo when
+using the Homebrew prefix on Apple Silicon):
+```bash
+cmake .. -DCMAKE_INSTALL_PREFIX=/opt/homebrew
+make -j4
+make install          # installs LTESniffer into /opt/homebrew/bin
+```
+Keep the `build/` directory in place: `LTESniffer` loads `libsrsran_rf.dylib`
+from the build tree via an embedded path. If `/opt/homebrew/bin` is not on your
+PATH, add it: `echo 'export PATH="/opt/homebrew/bin:$PATH"' >> ~/.zshrc`.
+
+**4. Verify the SDR is detected**
+```bash
+SoapySDRUtil --info                 # should list the hackrf factory/module
+SoapySDRUtil --probe=driver=hackrf  # should open your HackRF
+```
+
+**5. Run (HackRF, downlink)**
+
+Pass the SoapySDR device through `-a`. HackRF has a single RX antenna, so use one
+antenna (`-A 1`, transmission mode 1):
+```bash
+# Cell search + downlink sniffing on a HackRF
+./src/LTESniffer -A 1 -W 4 -f <DL Freq> -C -m 0 -a "driver=hackrf"
+example: ./src/LTESniffer -A 1 -W 4 -f 1840e6 -C -m 0 -a "driver=hackrf"
+```
+For PlutoSDR, use `-a "driver=plutosdr"` (over USB it is auto-detected; append
+`,uri=ip:192.168.2.1` to force the network interface). PlutoSDR also has a single
+RX channel, so use `-A 1`, and tune within its 325 MHz – 3.8 GHz range:
+```bash
+./src/LTESniffer -A 1 -W 4 -f 1840e6 -C -m 0 -a "driver=plutosdr"
+```
+
+> macOS notes:
+> - `sudo` is generally not required for HackRF/Pluto over USB on macOS.
+> - `--cpu_affinity` is ignored on macOS (no thread-affinity API); real-time
+>   performance depends on your Mac's CPU.
+
 ## Usage
 LTESniffer has 3 main functions: 
 - Sniffing LTE downlink traffic from the base station
