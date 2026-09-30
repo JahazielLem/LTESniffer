@@ -159,14 +159,14 @@ Homebrew prefix (no sudo needed on Apple Silicon):
 # libiio (v0.25; OSX_FRAMEWORK=OFF installs a plain dylib, not a framework)
 git clone -b v0.25 https://github.com/analogdevicesinc/libiio
 cmake -S libiio -B libiio/build -DCMAKE_INSTALL_PREFIX=/opt/homebrew \
-  -DOSX_FRAMEWORK=OFF -DWITH_LOCAL_BACKEND=OFF -DWITH_TESTS=OFF \
+  -DOSX_FRAMEWORK=OFF -DCMAKE_INSTALL_NAME_DIR=/opt/homebrew/lib -DWITH_LOCAL_BACKEND=OFF -DWITH_TESTS=OFF \
   -DWITH_DOC=OFF -DWITH_IIOD=OFF -DHAVE_DNS_SD=OFF
 cmake --build libiio/build -j4 && cmake --install libiio/build
 
 # libad9361
 git clone https://github.com/analogdevicesinc/libad9361-iio
 cmake -S libad9361-iio -B libad9361-iio/build \
-  -DCMAKE_INSTALL_PREFIX=/opt/homebrew -DOSX_FRAMEWORK=OFF
+  -DCMAKE_INSTALL_PREFIX=/opt/homebrew -DOSX_FRAMEWORK=OFF -DCMAKE_INSTALL_NAME_DIR=/opt/homebrew/lib
 cmake --build libad9361-iio/build -j4 && cmake --install libad9361-iio/build
 
 # SoapyPlutoSDR (CMAKE_FIND_FRAMEWORK=NEVER avoids a stale /Library/Frameworks copy)
