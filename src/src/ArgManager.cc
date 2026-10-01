@@ -46,7 +46,7 @@ void ArgManager::defaultArgs(Args& args) {
   args.skip_secondary_meta_formats = false;
   args.enable_shortcut_discovery = true;
   args.rnti_histogram_threshold = DEFAULT_RNTI_HISTOGRAM_THRESHOLD;
-  args.pcap_file = "ul_sniffer.pcap";
+  args.pcap_file = ""; // empty: use the default per-mode filename (see Core)
   args.harq_mode = 0;
   args.rnti = SRSRAN_SIRNTI;
   args.mcs_tracking_mode = 1;

@@ -227,8 +227,44 @@ RX channel, so use `-A 1`, and tune within its 325 MHz – 3.8 GHz range:
 
 > macOS notes:
 > - `sudo` is generally not required for HackRF/Pluto over USB on macOS.
+> - **Gain:** prefer the default AGC — just omit `-g`. A fixed `-g` value that is
+>   too low/high can make the cell search sync to garbage ("Invalid number of
+>   PRB ..."). With AGC, PlutoSDR reliably decodes the MIB here (verified on a
+>   live Band 28 cell at 763 MHz).
+> - PlutoSDR / HackRF frequency error is corrected automatically (CFO), so no
+>   ppm option is needed, unlike CellSearch in LTE-Cell-Scanner.
 > - `--cpu_affinity` is ignored on macOS (no thread-affinity API); real-time
 >   performance depends on your Mac's CPU.
+
+### Watching the traffic live in Wireshark (macOS)
+
+LTESniffer writes a MAC-LTE pcap (DLT 147 / `DLT_USER0`). To view packets live
+instead of opening a file afterwards, stream the pcap into Wireshark through a
+named pipe (FIFO).
+
+1. Install Wireshark and configure the dissector (one-time):
+   ```bash
+   brew install --cask wireshark
+   ```
+   In Wireshark: **Preferences → Protocols → DLT_USER → Edit** and add a row
+   `User 0 (DLT=147)` with payload protocol `mac-lte-framed`. (This is the same
+   mapping described in the pcap configuration guide linked below.)
+
+2. Create a FIFO and point LTESniffer's pcap output at it with `-F`:
+   ```bash
+   mkfifo /tmp/lte.pcap
+   # Start Wireshark reading the FIFO FIRST (it blocks waiting for the writer):
+   /Applications/Wireshark.app/Contents/MacOS/Wireshark -k -i /tmp/lte.pcap &
+   # Then start LTESniffer, writing the pcap to the same FIFO:
+   LTESniffer -A 1 -W 4 -f 763e6 -C -m 0 -a "driver=plutosdr" -F /tmp/lte.pcap
+   ```
+   Packets now appear in Wireshark in real time. Useful display filters:
+   `mac-lte` (all), `mac-lte.direction == 1` (downlink), `== 0` (uplink).
+
+   Order matters: open the Wireshark reader before LTESniffer, because writing a
+   FIFO blocks until a reader is attached. The `-F` flag sets the pcap filename
+   for any mode; without it, LTESniffer writes `ltesniffer_dl_mode.pcap` /
+   `ltesniffer_ul_mode.pcap` in the current directory as before.
 
 ## Usage
 LTESniffer has 3 main functions: 

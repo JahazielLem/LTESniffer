@@ -60,7 +60,11 @@ LTESniffer_Core::LTESniffer_Core(const Args& args):
   // std::string pcap_file_name = "ul_pcap_" + str_cur_time + "pcap";
   std::string pcap_file_name;
   std::string pcap_file_name_api = "api_collector.pcap";
-  if (sniffer_mode == DL_MODE){
+  if (!args.pcap_file.empty()) {
+    // Explicit output (via -F); can be a regular file or a named pipe (FIFO)
+    // for live viewing in Wireshark.
+    pcap_file_name = args.pcap_file;
+  } else if (sniffer_mode == DL_MODE){
     pcap_file_name = "ltesniffer_dl_mode.pcap";
   } else {
     pcap_file_name = "ltesniffer_ul_mode.pcap";
