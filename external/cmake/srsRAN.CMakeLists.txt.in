@@ -1,5 +1,5 @@
- 
-cmake_minimum_required(VERSION 2.8.2)
+
+cmake_minimum_required(VERSION 3.5)
 
 project(srsLTE-download NONE)
 
@@ -10,6 +10,7 @@ ExternalProject_Add(srsRAN
 #    GIT_TAG falcon_v0.1
     SOURCE_DIR "${CMAKE_BINARY_DIR}/srsRAN-src"
     BINARY_DIR "${CMAKE_BINARY_DIR}/srsRAN-build"
+    PATCH_COMMAND ${SRSRAN_PATCH_COMMAND}
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
     INSTALL_COMMAND ""

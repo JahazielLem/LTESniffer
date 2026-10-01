@@ -1,0 +1,812 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 26bf960..b741040 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -203,6 +203,12 @@ else(POLARSSL_FOUND)
+   endif (MBEDTLS_FOUND)
+ endif(POLARSSL_FOUND)
+ 
++# The security headers (mbedTLS/PolarSSL) are not on the default include path on
++# macOS/Homebrew, so add them explicitly.
++if(SEC_INCLUDE_DIRS)
++  include_directories(BEFORE ${SEC_INCLUDE_DIRS})
++endif()
++
+ # Hard-SIM support
+ if(ENABLE_HARDSIM)
+   find_package(PCSCLite)
+@@ -481,10 +487,12 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
+       set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DHAVE_NEONv8")
+       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DHAVE_NEONv8")
+     endif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+-    if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
++    if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm" AND NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
++      # 32-bit ARM only: NEON needs explicit flags. On aarch64/arm64 (incl.
++      # Apple Silicon) NEON is baseline and clang rejects -mfpu/-mfloat-abi.
+       set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mfloat-abi=hard -mfpu=neon")
+       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfloat-abi=hard -mfpu=neon")
+-    endif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
++    endif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm" AND NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
+   else(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm" OR ${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch" OR ${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+     set(HAVE_NEON "False")
+   endif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm" OR ${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch" OR ${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
+@@ -530,6 +538,11 @@ endif(CMAKE_C_COMPILER_ID MATCHES "GNU" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
+ if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+    # The following is needed for weak linking to work under OS X
+    set(CMAKE_SHARED_LINKER_FLAGS "-undefined dynamic_lookup")
++   # macOS hides POSIX/BSD types (size_t, time_t, NULL, ...) under strict
++   # -std=c99 unless _DARWIN_C_SOURCE is defined (the _GNU_SOURCE this project
++   # sets is a no-op on Apple libc).
++   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_DARWIN_C_SOURCE")
++   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_DARWIN_C_SOURCE")
+ endif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+ 
+ # Add colored output when using the Ninja generator
+@@ -538,8 +551,9 @@ if("Ninja" STREQUAL ${CMAKE_GENERATOR})
+   ADD_CXX_COMPILER_FLAG_IF_AVAILABLE("-fdiagnostics-color=always" HAVE_DIAGNOSTIC_COLOR_CXX)
+ endif()
+ 
+-# Add -Werror to C/C++ flags for newer compilers
+-if(NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 5.0)
++# Add -Werror to C/C++ flags for newer compilers (disabled on Apple: the newer
++# clang toolchain emits many warnings this old codebase was not written for).
++if(NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 5.0 AND NOT APPLE)
+   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+ endif()
+@@ -642,6 +656,10 @@ endfunction()
+ ########################################################################
+ include_directories(${PROJECT_BINARY_DIR}/lib/include)
+ include_directories(${PROJECT_SOURCE_DIR}/lib/include)
++# Make sure the srslog *bundled* fmt is always found before any system-installed
++# fmt (Homebrew ships one under /opt/homebrew/include, which SoapySDR/mbedtls/fftw
++# pull into the include path and which is ABI-incompatible with this bundled copy).
++include_directories(BEFORE ${PROJECT_SOURCE_DIR}/lib/include/srsran/srslog/bundled)
+ 
+ ########################################################################
+ # Add headers to cmake project (useful for IDEs)
+@@ -686,4 +704,6 @@ else(ENABLE_SRSEPC)
+   message(STATUS "srsEPC build disabled")
+ endif(ENABLE_SRSEPC)
+ 
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/cmake/modules/FindMbedTLS.cmake b/cmake/modules/FindMbedTLS.cmake
+index 2cc4508..62188d3 100644
+--- a/cmake/modules/FindMbedTLS.cmake
++++ b/cmake/modules/FindMbedTLS.cmake
+@@ -32,7 +32,9 @@ PKG_CHECK_MODULES(PC_MBEDTLS mbedtls)
+ FIND_PATH(
+     MBEDTLS_INCLUDE_DIRS
+     NAMES mbedtls/md.h
+-    HINTS $ENV{MBEDTLS_DIR}/include
++    HINTS /opt/homebrew/opt/mbedtls@2/include
++          /usr/local/opt/mbedtls@2/include
++          $ENV{MBEDTLS_DIR}/include
+           ${PC_MBEDTLS_INCLUDEDIR}
+           ${CMAKE_INSTALL_PREFIX}/include
+     PATHS /usr/local/include
+@@ -42,7 +44,9 @@ FIND_PATH(
+ FIND_LIBRARY(
+     MBEDTLS_LIBRARIES
+     NAMES mbedcrypto
+-    HINTS $ENV{MBEDTLS_DIR}/lib
++    HINTS /opt/homebrew/opt/mbedtls@2/lib
++          /usr/local/opt/mbedtls@2/lib
++          $ENV{MBEDTLS_DIR}/lib
+           ${PC_MBEDTLS_LIBDIR}
+           ${CMAKE_INSTALL_PREFIX}/lib
+           ${CMAKE_INSTALL_PREFIX}/lib64
+diff --git a/cmake/modules/FindSoapySDR.cmake b/cmake/modules/FindSoapySDR.cmake
+index 2bc965f..9e71ca2 100644
+--- a/cmake/modules/FindSoapySDR.cmake
++++ b/cmake/modules/FindSoapySDR.cmake
+@@ -3,41 +3,34 @@
+ #
+ # This file is part of srsRAN
+ #
+-# srsRAN is free software: you can redistribute it and/or modify
+-# it under the terms of the GNU Affero General Public License as
+-# published by the Free Software Foundation, either version 3 of
+-# the License, or (at your option) any later version.
+-#
+-# srsRAN is distributed in the hope that it will be useful,
+-# but WITHOUT ANY WARRANTY; without even the implied warranty of
+-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+-# GNU Affero General Public License for more details.
+-#
+-# A copy of the GNU Affero General Public License can be found in
+-# the LICENSE file in the top-level directory of this distribution
+-# and at http://www.gnu.org/licenses/.
++# Locate the SoapySDR library. The include directory returned is the PARENT of
++# the "SoapySDR" folder, because the sources include <SoapySDR/Device.h>. On
++# case-insensitive filesystems (default on macOS) pointing directly at the
++# SoapySDR folder would shadow system headers such as <time.h>/<types.h> with
++# SoapySDR's Time.h/Types.h, so we deliberately avoid that.
+ #
+ 
+ message(STATUS "FINDING SOAPY.")
+ if(NOT SOAPYSDR_FOUND)
+   pkg_check_modules (SOAPYSDR_PKG SoapySDR)
+ 
+-  find_path(SOAPYSDR_INCLUDE_DIRS 
+-    NAMES Device.h
++  find_path(SOAPYSDR_INCLUDE_DIRS
++    NAMES SoapySDR/Device.h
+     HINTS $ENV{SOAPY_DIR}/include
+-          $ENV{SOAPY_DIR}/include/SoapySDR
+     PATHS ${SOAPYSDR_PKG_INCLUDE_DIRS}
+-          /usr/include/SoapySDR
+-          /usr/local/include/SoapySDR
++          /usr/include
++          /usr/local/include
++          /opt/homebrew/include
+   )
+ 
+-  find_library(SOAPYSDR_LIBRARIES 
++  find_library(SOAPYSDR_LIBRARIES
+     NAMES SoapySDR
+     HINTS $ENV{SOAPY_DIR}/lib
+     PATHS ${SOAPYSDR_PKG_LIBRARY_DIRS}
+           /usr/lib
+           /usr/local/lib
+-          /usr/lib/arm-linux-gnueabihf     
++          /usr/lib/arm-linux-gnueabihf
++          /opt/homebrew/lib
+   )
+ 
+ 
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index 29b1f2f..960d4e2 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -23,8 +23,12 @@
+ ########################################################################
+ add_subdirectory(src)
+ add_subdirectory(include)
+-add_subdirectory(examples)
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(examples)
++endif(NOT APPLE)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+ 
+ ########################################################################
+ # Install library headers
+diff --git a/lib/include/srsran/adt/circular_map.h b/lib/include/srsran/adt/circular_map.h
+index eee22a6..05d1153 100644
+--- a/lib/include/srsran/adt/circular_map.h
++++ b/lib/include/srsran/adt/circular_map.h
+@@ -130,7 +130,7 @@ public:
+   {
+     for (size_t idx = 0; idx < other.capacity(); ++idx) {
+       if (present[idx]) {
+-        buffer[idx].template emplace(other.get_obj_(idx));
++        buffer[idx].emplace(other.get_obj_(idx));
+       }
+     }
+   }
+@@ -138,7 +138,7 @@ public:
+   {
+     for (size_t idx = 0; idx < other.capacity(); ++idx) {
+       if (present[idx]) {
+-        buffer[idx].template emplace(std::move(other.get_obj_(idx)));
++        buffer[idx].emplace(std::move(other.get_obj_(idx)));
+       }
+     }
+     other.clear();
+@@ -178,7 +178,7 @@ public:
+     if (present[idx]) {
+       return false;
+     }
+-    buffer[idx].template emplace(id, obj);
++    buffer[idx].emplace(id, obj);
+     present[idx] = true;
+     count++;
+     return true;
+@@ -189,7 +189,7 @@ public:
+     if (present[idx]) {
+       return srsran::expected<iterator, T>(std::move(obj));
+     }
+-    buffer[idx].template emplace(id, std::move(obj));
++    buffer[idx].emplace(id, std::move(obj));
+     present[idx] = true;
+     count++;
+     return iterator(this, idx);
+diff --git a/lib/include/srsran/common/threads.h b/lib/include/srsran/common/threads.h
+index 28c9380..04edcec 100644
+--- a/lib/include/srsran/common/threads.h
++++ b/lib/include/srsran/common/threads.h
+@@ -25,7 +25,9 @@
+ #include <pthread.h>
+ #include <stdint.h>
+ #include <stdio.h>
++#ifndef __APPLE__
+ #include <sys/timerfd.h>
++#endif
+ #include <unistd.h>
+ 
+ // Default priority for all threads below UHD threads
+@@ -84,7 +86,11 @@ public:
+   void set_name(const std::string& name_)
+   {
+     name = name_;
++#ifdef __APPLE__
++    pthread_setname_np(name.c_str());
++#else
+     pthread_setname_np(pthread_self(), name.c_str());
++#endif
+   }
+ 
+   void wait_thread_finish() { pthread_join(_thread, NULL); }
+@@ -108,7 +114,11 @@ protected:
+ private:
+   static void* thread_function_entry(void* _this)
+   {
++#ifdef __APPLE__
++    pthread_setname_np(((thread*)_this)->name.c_str());
++#else
+     pthread_setname_np(pthread_self(), ((thread*)_this)->name.c_str());
++#endif
+     ((thread*)_this)->run_thread();
+     return NULL;
+   }
+@@ -159,6 +169,14 @@ private:
+ 
+   int make_periodic()
+   {
++#ifdef __APPLE__
++    // macOS has neither timerfd nor struct itimerspec; periodic_thread is not
++    // used by the LTESniffer decoding path, so this is a no-op stub there.
++    fprintf(stderr, "periodic_thread::make_periodic is not supported on macOS\n");
++    wakeups_missed = 0;
++    timer_fd       = -1;
++    return -1;
++#else
+     int               ret = -1;
+     unsigned int      ns;
+     unsigned int      sec;
+@@ -184,6 +202,7 @@ private:
+       perror("timerfd_create");
+     }
+     return ret;
++#endif
+   }
+ 
+   void wait_period()
+diff --git a/lib/include/srsran/srslog/detail/log_entry_metadata.h b/lib/include/srsran/srslog/detail/log_entry_metadata.h
+index a14262d..9181db1 100644
+--- a/lib/include/srsran/srslog/detail/log_entry_metadata.h
++++ b/lib/include/srsran/srslog/detail/log_entry_metadata.h
+@@ -40,7 +40,7 @@ struct log_context {
+ 
+ /// Metadata fields carried for each log entry.
+ struct log_entry_metadata {
+-  std::chrono::high_resolution_clock::time_point      tp;
++  std::chrono::system_clock::time_point      tp;
+   log_context                                         context;
+   const char*                                         fmtstring;
+   fmt::dynamic_format_arg_store<fmt::printf_context>* store;
+diff --git a/lib/include/srsran/srslog/log_channel.h b/lib/include/srsran/srslog/log_channel.h
+index b01356a..e3f5e44 100644
+--- a/lib/include/srsran/srslog/log_channel.h
++++ b/lib/include/srsran/srslog/log_channel.h
+@@ -113,7 +113,7 @@ public:
+                                [&formatter](detail::log_entry_metadata&& metadata, fmt::memory_buffer& buffer) {
+                                  formatter.format(std::move(metadata), buffer);
+                                },
+-                               {std::chrono::high_resolution_clock::now(),
++                               {std::chrono::system_clock::now(),
+                                 {ctx_value, should_print_context},
+                                 fmtstr,
+                                 store,
+@@ -149,7 +149,7 @@ public:
+                                [&formatter](detail::log_entry_metadata&& metadata, fmt::memory_buffer& buffer) {
+                                  formatter.format(std::move(metadata), buffer);
+                                },
+-                               {std::chrono::high_resolution_clock::now(),
++                               {std::chrono::system_clock::now(),
+                                 {ctx_value, should_print_context},
+                                 fmtstr,
+                                 store,
+@@ -174,7 +174,7 @@ public:
+                                [&formatter, ctx](detail::log_entry_metadata&& metadata, fmt::memory_buffer& buffer) {
+                                  formatter.format_ctx(ctx, std::move(metadata), buffer);
+                                },
+-                               {std::chrono::high_resolution_clock::now(),
++                               {std::chrono::system_clock::now(),
+                                 {ctx_value, should_print_context},
+                                 nullptr,
+                                 nullptr,
+@@ -205,7 +205,7 @@ public:
+                                [&formatter, ctx](detail::log_entry_metadata&& metadata, fmt::memory_buffer& buffer) {
+                                  formatter.format_ctx(ctx, std::move(metadata), buffer);
+                                },
+-                               {std::chrono::high_resolution_clock::now(),
++                               {std::chrono::system_clock::now(),
+                                 {ctx_value, should_print_context},
+                                 fmtstr,
+                                 store,
+diff --git a/lib/src/CMakeLists.txt b/lib/src/CMakeLists.txt
+index aa9940f..ac90d58 100644
+--- a/lib/src/CMakeLists.txt
++++ b/lib/src/CMakeLists.txt
+@@ -28,4 +28,6 @@ add_subdirectory(pdcp)
+ add_subdirectory(gtpu)
+ add_subdirectory(srslog)
+ add_subdirectory(support)
+-add_subdirectory(system)
++if(NOT APPLE)
++  add_subdirectory(system)
++endif(NOT APPLE)
+diff --git a/lib/src/common/CMakeLists.txt b/lib/src/common/CMakeLists.txt
+index e6c0b12..06f2f10 100644
+--- a/lib/src/common/CMakeLists.txt
++++ b/lib/src/common/CMakeLists.txt
+@@ -31,8 +31,6 @@ set(SOURCES arch_select.cc
+             mac_pcap.cc
+             mac_pcap_base.cc
+             nas_pcap.cc
+-            network_utils.cc
+-            mac_pcap_net.cc
+             pcap.c
+             phy_cfg_nr.cc
+             phy_cfg_nr_default.cc
+@@ -52,16 +50,24 @@ set(SOURCES arch_select.cc
+ # Avoid warnings caused by libmbedtls about deprecated functions
+ set_source_files_properties(security.cc PROPERTIES COMPILE_FLAGS -Wno-deprecated-declarations)
+ 
++if(APPLE)
++  # network_utils.cc / mac_pcap_net.cc rely on Linux SCTP (netinet/sctp.h),
++  # which macOS lacks. They are only used by the srsENB/srsEPC network stack,
++  # not by the PHY/MAC path LTESniffer needs, so they are excluded here.
++  list(REMOVE_ITEM SOURCES network_utils.cc mac_pcap_net.cc)
++endif(APPLE)
+ add_library(srsran_common STATIC ${SOURCES})
+-add_custom_target(gen_build_info COMMAND cmake -P ${CMAKE_BINARY_DIR}/SRSRANbuildinfo.cmake)
++add_custom_target(gen_build_info COMMAND ${CMAKE_COMMAND} -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -P ${CMAKE_BINARY_DIR}/SRSRANbuildinfo.cmake)
+ add_dependencies(srsran_common gen_build_info)
+ 
+ add_executable(arch_select arch_select.cc)
+ 
+ target_include_directories(srsran_common PUBLIC ${SEC_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR} ${BACKWARD_INCLUDE_DIRS})
+-target_link_libraries(srsran_common srsran_phy support srslog ${SEC_LIBRARIES} ${BACKWARD_LIBRARIES} ${SCTP_LIBRARIES})
++target_link_libraries(srsran_common srsran_phy support srslog ${SEC_LIBRARIES} ${BACKWARD_LIBRARIES} $<$<NOT:$<BOOL:${APPLE}>>:${SCTP_LIBRARIES}>)
+ target_compile_definitions(srsran_common PRIVATE ${BACKWARD_DEFINITIONS})
+ 
+ INSTALL(TARGETS srsran_common DESTINATION ${LIBRARY_DIR})
+ 
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/common/arch_select.cc b/lib/src/common/arch_select.cc
+index aa320f8..6122210 100644
+--- a/lib/src/common/arch_select.cc
++++ b/lib/src/common/arch_select.cc
+@@ -26,10 +26,15 @@
+ #include <unistd.h>
+ 
+ #ifdef IS_ARM
++#ifdef __APPLE__
++// macOS/Apple Silicon: no Linux auxv/hwcap; NEON is part of the ARMv8 baseline.
++#include <stdio.h>
++#else
+ #include <asm/hwcap.h>
+ #include <stdio.h>
+ #include <sys/auxv.h>
+ #define USER_HWCAP_NEON (1 << 12)
++#endif
+ #else
+ #include <cpuid.h>
+ #define X86_CPUID_BASIC_LEAF 1
+@@ -93,6 +98,10 @@ const char* x86_get_isa()
+ #ifdef IS_ARM
+ const char* arm_get_isa()
+ {
++#ifdef __APPLE__
++  // Apple Silicon always provides NEON.
++  return "neon";
++#else
+ #ifdef HAVE_NEONv8
+   if (getauxval(AT_HWCAP) & USER_HWCAP_NEON) {
+ #else
+@@ -102,6 +111,7 @@ const char* arm_get_isa()
+   } else {
+     return "generic";
+   }
++#endif
+ }
+ #endif
+ 
+diff --git a/lib/src/common/pcap.c b/lib/src/common/pcap.c
+index f33e739..9403d14 100644
+--- a/lib/src/common/pcap.c
++++ b/lib/src/common/pcap.c
+@@ -21,7 +21,18 @@
+ 
+ #include "srsran/common/pcap.h"
+ #include <arpa/inet.h>
++#ifdef __APPLE__
++// macOS <netinet/udp.h> uses BSD field names (uh_*). This code uses the Linux
++// glibc field names, so provide a matching struct here.
++struct udphdr {
++  uint16_t source;
++  uint16_t dest;
++  uint16_t len;
++  uint16_t check;
++};
++#else
+ #include <linux/udp.h>
++#endif
+ #include <stdio.h>
+ #include <string.h>
+ #include <sys/time.h>
+diff --git a/lib/src/common/threads.c b/lib/src/common/threads.c
+index a56df78..d8d3e4a 100644
+--- a/lib/src/common/threads.c
++++ b/lib/src/common/threads.c
+@@ -28,6 +28,27 @@
+ 
+ #include "srsran/common/threads.h"
+ 
++#ifdef __APPLE__
++// macOS provides no CPU-affinity API (cpu_set_t / CPU_* / *_affinity_np).
++// Provide no-op shims so the real-time thread helpers still build; thread
++// affinity is simply not applied on macOS.
++typedef int cpu_set_t;
++#define CPU_ZERO(set)        do { (void)(set); } while (0)
++#define CPU_SET(cpu, set)    do { (void)(cpu); (void)(set); } while (0)
++#define CPU_ISSET(cpu, set)  (0)
++#define CPU_SETSIZE          0
++static inline int pthread_attr_setaffinity_np(pthread_attr_t* a, size_t sz, const cpu_set_t* c)
++{
++  (void)a; (void)sz; (void)c;
++  return 0;
++}
++static inline int pthread_getaffinity_np(pthread_t t, size_t sz, cpu_set_t* c)
++{
++  (void)t; (void)sz; (void)c;
++  return 0;
++}
++#endif // __APPLE__
++
+ bool threads_new_rt(pthread_t* thread, void* (*start_routine)(void*), void* arg)
+ {
+   return threads_new_rt_prio(thread, start_routine, arg, -1);
+diff --git a/lib/src/mac/mac_sch_pdu_nr.cc b/lib/src/mac/mac_sch_pdu_nr.cc
+index d06d7b0..790c4ea 100644
+--- a/lib/src/mac/mac_sch_pdu_nr.cc
++++ b/lib/src/mac/mac_sch_pdu_nr.cc
+@@ -21,6 +21,25 @@
+ 
+ #include "srsran/mac/mac_sch_pdu_nr.h"
+ 
++#ifdef __APPLE__
++// macOS lacks <endian.h>; map the Linux byte-order helpers onto OSByteOrder.
++#include <libkern/OSByteOrder.h>
++#ifndef htole16
++#define htole16(x) OSSwapHostToLittleInt16(x)
++#define htole32(x) OSSwapHostToLittleInt32(x)
++#define htole64(x) OSSwapHostToLittleInt64(x)
++#define le16toh(x) OSSwapLittleToHostInt16(x)
++#define le32toh(x) OSSwapLittleToHostInt32(x)
++#define le64toh(x) OSSwapLittleToHostInt64(x)
++#define htobe16(x) OSSwapHostToBigInt16(x)
++#define htobe32(x) OSSwapHostToBigInt32(x)
++#define htobe64(x) OSSwapHostToBigInt64(x)
++#define be16toh(x) OSSwapBigToHostInt16(x)
++#define be32toh(x) OSSwapBigToHostInt32(x)
++#define be64toh(x) OSSwapBigToHostInt64(x)
++#endif
++#endif // __APPLE__
++
+ namespace srsran {
+ 
+ mac_sch_subpdu_nr::nr_lcid_sch_t mac_sch_subpdu_nr::get_type()
+diff --git a/lib/src/mac/pdu.cc b/lib/src/mac/pdu.cc
+index b1a05b1..c70f21b 100644
+--- a/lib/src/mac/pdu.cc
++++ b/lib/src/mac/pdu.cc
+@@ -20,6 +20,25 @@
+  */
+ 
+ #include <inttypes.h>
++
++#ifdef __APPLE__
++// macOS lacks <endian.h>; map the Linux byte-order helpers onto OSByteOrder.
++#include <libkern/OSByteOrder.h>
++#ifndef htole16
++#define htole16(x) OSSwapHostToLittleInt16(x)
++#define htole32(x) OSSwapHostToLittleInt32(x)
++#define htole64(x) OSSwapHostToLittleInt64(x)
++#define le16toh(x) OSSwapLittleToHostInt16(x)
++#define le32toh(x) OSSwapLittleToHostInt32(x)
++#define le64toh(x) OSSwapLittleToHostInt64(x)
++#define htobe16(x) OSSwapHostToBigInt16(x)
++#define htobe32(x) OSSwapHostToBigInt32(x)
++#define htobe64(x) OSSwapHostToBigInt64(x)
++#define be16toh(x) OSSwapBigToHostInt16(x)
++#define be32toh(x) OSSwapBigToHostInt32(x)
++#define be64toh(x) OSSwapBigToHostInt64(x)
++#endif
++#endif // __APPLE__
+ #include <stdlib.h>
+ #include <string.h>
+ #include <strings.h>
+diff --git a/lib/src/phy/ch_estimation/CMakeLists.txt b/lib/src/phy/ch_estimation/CMakeLists.txt
+index 2d523f3..445d30b 100644
+--- a/lib/src/phy/ch_estimation/CMakeLists.txt
++++ b/lib/src/phy/ch_estimation/CMakeLists.txt
+@@ -20,4 +20,6 @@
+ 
+ file(GLOB SOURCES "*.c")
+ add_library(srsran_ch_estimation OBJECT ${SOURCES})
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/channel/CMakeLists.txt b/lib/src/phy/channel/CMakeLists.txt
+index e6724b5..4e0fed2 100644
+--- a/lib/src/phy/channel/CMakeLists.txt
++++ b/lib/src/phy/channel/CMakeLists.txt
+@@ -21,4 +21,6 @@
+ file(GLOB SOURCES "*.c" "*.cc")
+ add_library(srsran_channel OBJECT ${SOURCES})
+ 
+-add_subdirectory(test)
+\ No newline at end of file
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+\ No newline at end of file
+diff --git a/lib/src/phy/common/CMakeLists.txt b/lib/src/phy/common/CMakeLists.txt
+index 279de82..03b7d00 100644
+--- a/lib/src/phy/common/CMakeLists.txt
++++ b/lib/src/phy/common/CMakeLists.txt
+@@ -21,4 +21,6 @@
+ set(SOURCES phy_common.c phy_common_sl.c  phy_common_nr.c sequence.c timestamp.c zc_sequence.c sliv.c)
+ add_library(srsran_phy_common OBJECT ${SOURCES})
+ 
+-add_subdirectory(test)
+\ No newline at end of file
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+\ No newline at end of file
+diff --git a/lib/src/phy/dft/CMakeLists.txt b/lib/src/phy/dft/CMakeLists.txt
+index 168002a..a656f1a 100644
+--- a/lib/src/phy/dft/CMakeLists.txt
++++ b/lib/src/phy/dft/CMakeLists.txt
+@@ -20,4 +20,6 @@
+ 
+ set(SRCS dft_fftw.c dft_precoding.c ofdm.c)
+ add_library(srsran_dft OBJECT ${SRCS})
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/fec/CMakeLists.txt b/lib/src/phy/fec/CMakeLists.txt
+index 5e4e596..26b83c7 100644
+--- a/lib/src/phy/fec/CMakeLists.txt
++++ b/lib/src/phy/fec/CMakeLists.txt
+@@ -27,7 +27,9 @@ add_subdirectory(block)
+ add_subdirectory(convolutional)
+ add_subdirectory(ldpc)
+ add_subdirectory(polar)
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+ add_subdirectory(turbo)
+ 
+ add_library(srsran_fec OBJECT ${FEC_SOURCES})
+diff --git a/lib/src/phy/fec/block/CMakeLists.txt b/lib/src/phy/fec/block/CMakeLists.txt
+index e6385c7..46c9c1e 100644
+--- a/lib/src/phy/fec/block/CMakeLists.txt
++++ b/lib/src/phy/fec/block/CMakeLists.txt
+@@ -22,4 +22,6 @@ set(FEC_SOURCES ${FEC_SOURCES}
+         block/block.c
+         PARENT_SCOPE)
+ 
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/fec/convolutional/CMakeLists.txt b/lib/src/phy/fec/convolutional/CMakeLists.txt
+index a4d3dc7..e2f87e4 100644
+--- a/lib/src/phy/fec/convolutional/CMakeLists.txt
++++ b/lib/src/phy/fec/convolutional/CMakeLists.txt
+@@ -29,4 +29,6 @@ set(FEC_SOURCES ${FEC_SOURCES}
+         convolutional/viterbi37_sse.c
+         PARENT_SCOPE)
+ 
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/fec/ldpc/CMakeLists.txt b/lib/src/phy/fec/ldpc/CMakeLists.txt
+index ceba4e9..09b6734 100644
+--- a/lib/src/phy/fec/ldpc/CMakeLists.txt
++++ b/lib/src/phy/fec/ldpc/CMakeLists.txt
+@@ -51,4 +51,6 @@ set(FEC_SOURCES ${FEC_SOURCES} ${AVX2_SOURCES} ${AVX512_SOURCES}
+         ldpc/ldpc_rm.c
+         PARENT_SCOPE)
+ 
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/fec/polar/CMakeLists.txt b/lib/src/phy/fec/polar/CMakeLists.txt
+index 26842c8..864c059 100644
+--- a/lib/src/phy/fec/polar/CMakeLists.txt
++++ b/lib/src/phy/fec/polar/CMakeLists.txt
+@@ -41,4 +41,6 @@ set(FEC_SOURCES ${FEC_SOURCES} ${AVX2_SOURCES}
+         polar/polar_rm.c
+         PARENT_SCOPE)
+ 
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/fec/turbo/CMakeLists.txt b/lib/src/phy/fec/turbo/CMakeLists.txt
+index 6f295db..8e4af58 100644
+--- a/lib/src/phy/fec/turbo/CMakeLists.txt
++++ b/lib/src/phy/fec/turbo/CMakeLists.txt
+@@ -29,4 +29,6 @@ set(FEC_SOURCES ${FEC_SOURCES}
+         turbo/turbodecoder_sse.c
+         PARENT_SCOPE)
+ 
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/mimo/CMakeLists.txt b/lib/src/phy/mimo/CMakeLists.txt
+index ce1425e..9fe930a 100644
+--- a/lib/src/phy/mimo/CMakeLists.txt
++++ b/lib/src/phy/mimo/CMakeLists.txt
+@@ -20,4 +20,6 @@
+ 
+ file(GLOB SOURCES "*.c")
+ add_library(srsran_mimo OBJECT ${SOURCES})
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/modem/CMakeLists.txt b/lib/src/phy/modem/CMakeLists.txt
+index 1df22ed..d68f108 100644
+--- a/lib/src/phy/modem/CMakeLists.txt
++++ b/lib/src/phy/modem/CMakeLists.txt
+@@ -20,4 +20,6 @@
+ 
+ file(GLOB SOURCES "*.c")
+ add_library(srsran_modem OBJECT ${SOURCES})
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/phch/CMakeLists.txt b/lib/src/phy/phch/CMakeLists.txt
+index 226e233..482078e 100644
+--- a/lib/src/phy/phch/CMakeLists.txt
++++ b/lib/src/phy/phch/CMakeLists.txt
+@@ -20,4 +20,6 @@
+ 
+ file(GLOB SOURCES "*.c")
+ add_library(srsran_phch OBJECT ${SOURCES})
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/resampling/CMakeLists.txt b/lib/src/phy/resampling/CMakeLists.txt
+index f6a43d6..1ae6d1a 100644
+--- a/lib/src/phy/resampling/CMakeLists.txt
++++ b/lib/src/phy/resampling/CMakeLists.txt
+@@ -20,4 +20,6 @@
+ 
+ file(GLOB SOURCES "*.c")
+ add_library(srsran_resampling OBJECT ${SOURCES})
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/scrambling/CMakeLists.txt b/lib/src/phy/scrambling/CMakeLists.txt
+index f97363a..b72aca7 100644
+--- a/lib/src/phy/scrambling/CMakeLists.txt
++++ b/lib/src/phy/scrambling/CMakeLists.txt
+@@ -20,4 +20,6 @@
+ 
+ file(GLOB SOURCES "*.c")
+ add_library(srsran_scrambling OBJECT ${SOURCES})
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/sync/CMakeLists.txt b/lib/src/phy/sync/CMakeLists.txt
+index 2a1d54c..f252c39 100644
+--- a/lib/src/phy/sync/CMakeLists.txt
++++ b/lib/src/phy/sync/CMakeLists.txt
+@@ -20,4 +20,6 @@
+ 
+ file(GLOB SOURCES "*.c")
+ add_library(srsran_sync OBJECT ${SOURCES})
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/phy/ue/CMakeLists.txt b/lib/src/phy/ue/CMakeLists.txt
+index c50dfad..bfd6823 100644
+--- a/lib/src/phy/ue/CMakeLists.txt
++++ b/lib/src/phy/ue/CMakeLists.txt
+@@ -21,4 +21,6 @@
+ file(GLOB SOURCES "*.c")
+ add_library(srsran_ue OBJECT ${SOURCES})
+ 
+-add_subdirectory(test)
+\ No newline at end of file
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+\ No newline at end of file
+diff --git a/lib/src/phy/utils/CMakeLists.txt b/lib/src/phy/utils/CMakeLists.txt
+index da8c239..f6fc7fc 100644
+--- a/lib/src/phy/utils/CMakeLists.txt
++++ b/lib/src/phy/utils/CMakeLists.txt
+@@ -25,4 +25,6 @@ if(VOLK_FOUND)
+   set_target_properties(srsran_utils PROPERTIES COMPILE_DEFINITIONS "${VOLK_DEFINITIONS}")
+ endif(VOLK_FOUND)
+ 
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/radio/CMakeLists.txt b/lib/src/radio/CMakeLists.txt
+index 77b6570..54c1f7a 100644
+--- a/lib/src/radio/CMakeLists.txt
++++ b/lib/src/radio/CMakeLists.txt
+@@ -24,4 +24,6 @@ if(RF_FOUND)
+   INSTALL(TARGETS srsran_radio DESTINATION ${LIBRARY_DIR})
+ endif(RF_FOUND)
+ 
+-add_subdirectory(test)
++if(NOT APPLE)
++  add_subdirectory(test)
++endif(NOT APPLE)
+diff --git a/lib/src/srslog/event_trace.cpp b/lib/src/srslog/event_trace.cpp
+index 4064996..3d7cd6c 100644
+--- a/lib/src/srslog/event_trace.cpp
++++ b/lib/src/srslog/event_trace.cpp
+@@ -104,7 +104,7 @@ void trace_duration_begin(const std::string& category, const std::string& name)
+ 
+   char fmt_time[24];
+   format_time(fmt_time, sizeof(fmt_time));
+-  (*tracer)("[%s] [TID:%0u] Entering \"%s\": %s", fmt_time, (unsigned)::pthread_self(), category, name);
++  (*tracer)("[%s] [TID:%0u] Entering \"%s\": %s", fmt_time, (unsigned)(uintptr_t)::pthread_self(), category, name);
+ }
+ 
+ void trace_duration_end(const std::string& category, const std::string& name)
+@@ -115,7 +115,7 @@ void trace_duration_end(const std::string& category, const std::string& name)
+ 
+   char fmt_time[24];
+   format_time(fmt_time, sizeof(fmt_time));
+-  (*tracer)("[%s] [TID:%0u] Leaving \"%s\": %s", fmt_time, (unsigned)::pthread_self(), category, name);
++  (*tracer)("[%s] [TID:%0u] Leaving \"%s\": %s", fmt_time, (unsigned)(uintptr_t)::pthread_self(), category, name);
+ }
+ 
+ } // namespace srslog
+diff --git a/lib/src/srslog/formatters/text_formatter.cpp b/lib/src/srslog/formatters/text_formatter.cpp
+index 50e126f..45846ea 100644
+--- a/lib/src/srslog/formatters/text_formatter.cpp
++++ b/lib/src/srslog/formatters/text_formatter.cpp
+@@ -49,7 +49,7 @@ static void format_hex_dump(const std::vector<uint8_t>& v, fmt::memory_buffer& b
+ static void format_metadata(const detail::log_entry_metadata& metadata, fmt::memory_buffer& buffer)
+ {
+   // Time stamp data preparation.
+-  std::tm current_time = fmt::gmtime(std::chrono::high_resolution_clock::to_time_t(metadata.tp));
++  std::tm current_time = fmt::gmtime(std::chrono::system_clock::to_time_t(metadata.tp));
+   auto    us_fraction =
+       std::chrono::duration_cast<std::chrono::microseconds>(metadata.tp.time_since_epoch()).count() % 1000000u;
+   fmt::format_to(buffer, "{:%F}T{:%H:%M:%S}.{:06} ", current_time, current_time, us_fraction);

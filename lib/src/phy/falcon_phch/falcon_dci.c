@@ -631,7 +631,7 @@ void convert_ul_grant(srsran_pusch_grant_t*   ran_ul_grant,
                       srsran_ra_ul_grant_t*   ul_grant)
 {
   ul_grant->freq_hopping = ran_ul_grant->freq_hopping;
-  for (auto i = 0; i < SRSRAN_MAX_CODEWORDS; i++){
+  for (int i = 0; i < SRSRAN_MAX_CODEWORDS; i++){
     ul_grant->n_prb[i] = ran_ul_grant->n_prb[i];
     ul_grant->n_prb_tilde[i] = ran_ul_grant->n_prb_tilde[i];
   }

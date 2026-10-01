@@ -1,21 +1,27 @@
-
 message(STATUS "FINDING SOAPY.")
 if(NOT SOAPYSDR_FOUND)
   pkg_check_modules (SOAPYSDR_PKG SoapySDR)
 
-  find_path(SOAPYSDR_INCLUDE_DIRS 
-    NAMES Device.h
+  # NOTE: the include directory returned is the PARENT of the "SoapySDR" folder,
+  # because the sources include <SoapySDR/Device.h>. On case-insensitive
+  # filesystems (default on macOS) adding the SoapySDR folder directly to the
+  # include path would shadow system headers such as <time.h>/<types.h> with
+  # SoapySDR's Time.h/Types.h, breaking unrelated compilations.
+  find_path(SOAPYSDR_INCLUDE_DIRS
+    NAMES SoapySDR/Device.h
     PATHS ${SOAPYSDR_PKG_INCLUDE_DIRS}
-          /usr/include/SoapySDR
-          /usr/local/include/SoapySDR
+          /usr/include
+          /usr/local/include
+          /opt/homebrew/include
   )
 
-  find_library(SOAPYSDR_LIBRARIES 
+  find_library(SOAPYSDR_LIBRARIES
     NAMES SoapySDR
-    PATHS ${LIMESDR_PKG_LIBRARY_DIRS}
+    PATHS ${SOAPYSDR_PKG_LIBRARY_DIRS}
           /usr/lib
           /usr/local/lib
-          /usr/lib/arm-linux-gnueabihf     
+          /usr/lib/arm-linux-gnueabihf
+          /opt/homebrew/lib
   )
 
 

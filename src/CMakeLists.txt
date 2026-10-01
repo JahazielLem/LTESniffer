@@ -6,6 +6,12 @@ set(INSTALL_BUNDLE)
 add_executable(LTESniffer LTESniffer.cc)
 target_link_libraries(LTESniffer DL_Sniffer_lib falcon_common falcon_phy falcon_util falcon_prof)
 target_compile_options(LTESniffer PUBLIC "-std=c++11")
+# Keep the paths to the srsRAN shared libs (libsrsran_rf/radio, built in the
+# sub-project) in the installed binary's RPATH so it also runs once installed
+# onto PATH, not only from the build tree.
+set_target_properties(LTESniffer PROPERTIES
+  INSTALL_RPATH "${CMAKE_BINARY_DIR}/srsRAN-build/lib/src/phy/rf;${CMAKE_BINARY_DIR}/srsRAN-build/lib/src/radio;${CMAKE_INSTALL_PREFIX}/lib"
+  INSTALL_RPATH_USE_LINK_PATH TRUE)
 list(APPEND INSTALL_BUNDLE LTESniffer)
 
 # nested install targets are not supported by old Cmake on Ubuntu 18
