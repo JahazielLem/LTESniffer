@@ -266,6 +266,40 @@ named pipe (FIFO).
    for any mode; without it, LTESniffer writes `ltesniffer_dl_mode.pcap` /
    `ltesniffer_ul_mode.pcap` in the current directory as before.
 
+### SDR support & limitations with HackRF / PlutoSDR (macOS)
+
+These are low-cost USB 2.0 SDRs. Sniffing a cell requires capturing its **full
+bandwidth** (the PDCCH spans the whole band), so the sample-rate demand grows
+with the cell's PRB:
+
+| Cell bandwidth | PRB | Sample rate | HackRF (8-bit) | PlutoSDR (USB 2.0) |
+|----------------|-----|-------------|----------------|--------------------|
+| 1.4–5 MHz | 6–25 | 1.92–5.76 Msps | ✅ | ✅ (≥25 PRB) |
+| 10 MHz | 50 | 11.52 Msps | ✅ bandwidth OK | ❌ USB caps ~7.7 Msps |
+| 15–20 MHz | 75–100 | 15.36–30.72 Msps | ⚠️ edge of USB 2.0 | ❌ |
+
+Measured on this port (Apple Silicon):
+- **PlutoSDR** sustains only **~7.7 Msps** over USB 2.0 (the AD9361 itself and the
+  USB link, not the bus ceiling). It is **excellent for cell *detection*** (low
+  rate) but **cannot sniff a 10 MHz / 50 PRB cell**: at 11.52 Msps the stream is
+  gap-ridden and the PSS never locks. Its AD9361 also cannot do the 1.92 Msps
+  (6 PRB) cell-search rate ("Unable to set BB rate") — use a forced cell
+  (`-I <PCI> -p <PRB>`) so it starts directly at the cell rate.
+- **HackRF** sustains the full **11.51 Msps cleanly** (0 overflows), so bandwidth
+  is fine for 10 MHz. Its limits are RF-quality: the zero-IF **DC spike** and
+  **8-bit ADC** degrade PDCCH/PDSCH demodulation, so it reliably syncs and
+  decodes **MIB** but PDCCH/traffic decoding is marginal.
+- **Gain matters a lot on HackRF** (no AGC): on a strong cell, high gain
+  **clips** and the PSS peak collapses (stuck "Finding PSS... State: 0"). Lower
+  it (≈`-g 20..30`): the PSS peak jumps to >3 and it syncs. On a strong cell
+  `-g 24` reaches MIB decode.
+- **PlutoSDR** has an AGC, so just omit `-g`.
+
+For **robust real-time traffic decoding** of 10–20 MHz cells, a **USB 3.0 SDR
+(e.g. USRP B210)** is recommended; it sustains 11.52–30.72 Msps with a TCXO and
+a clean quadrature front end. HackRF/Pluto are great for learning, cell
+detection, and MIB/SIB-level work on macOS.
+
 ## Usage
 LTESniffer has 3 main functions: 
 - Sniffing LTE downlink traffic from the base station
